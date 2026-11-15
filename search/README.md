@@ -40,5 +40,5 @@ session-to-activity assumption.
 
 ```cmd
 python -m search.demo
-python -m unittest tests.test_search -v
+python -m unittest discover -s tests -p "test_search.py" -v
 ```
