@@ -1,4 +1,4 @@
-"""Train and evaluate a mark-prediction MLP on the prepared OULAD examples.
+"""Train and evaluate an MLP against a student-history baseline.
 
 The split is presentation-based: FFF 2013J trains; FFF 2014J tests.
 The model predicts observed marks from prior marks and pre-deadline activity.
@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-from sklearn.dummy import DummyRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.neural_network import MLPRegressor
@@ -29,13 +28,13 @@ FEATURES = [
     "clicks_preceding_28d",
     "clicks_preceding_7d",
 ]
+PREVIOUS_MEAN_INDEX = FEATURES.index("previous_score_mean")
 
 
 def load_split(path: Path):
     rows = []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        for row in csv.DictReader(handle):
-            rows.append(row)
+        rows.extend(csv.DictReader(handle))
     train_rows = [r for r in rows if r["split"] == "train"]
     test_rows = [r for r in rows if r["split"] == "test"]
     if not train_rows or not test_rows:
@@ -72,12 +71,14 @@ def main():
 
     x_train, y_train, x_test, y_test = load_split(args.data)
 
-    baseline = Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("model", DummyRegressor(strategy="mean")),
-    ])
-    baseline.fit(x_train, y_train)
-    baseline_predictions = baseline.predict(x_test)
+    # Stronger and more relevant than a global mean: predict each student's
+    # mean of scores actually available before the target assessment deadline.
+    # Students without prior scores fall back to the training-set mean.
+    prior_means = x_test[:, PREVIOUS_MEAN_INDEX]
+    baseline_predictions = np.where(
+        np.isfinite(prior_means), prior_means, float(np.mean(y_train))
+    )
+    baseline_predictions = np.clip(baseline_predictions, 0.0, 100.0)
 
     model = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
@@ -105,12 +106,14 @@ def main():
         "train_examples": int(len(y_train)),
         "test_examples": int(len(y_test)),
         "features": FEATURES,
-        "baseline_mean_predictor": metrics(y_test, baseline_predictions),
+        "baseline_student_previous_score_mean": metrics(y_test, baseline_predictions),
         "mlp": metrics(y_test, predictions),
         "mlp_iterations": int(model.named_steps["mlp"].n_iter_),
         "interpretation": (
-            "Predictive evaluation across presentations. This does not establish "
-            "that study sessions or clicks cause score improvements."
+            "Predictive evaluation across presentations. The baseline uses each "
+            "student's mean of scores submitted before the target deadline, falling "
+            "back to the training mean when no prior score exists. This does not "
+            "establish that study sessions or clicks cause score improvements."
         ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
