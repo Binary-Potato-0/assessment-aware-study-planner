@@ -1,7 +1,7 @@
-"""Build leakage-aware student/assessment examples from the local OULAD CSV files.
+"""Build leakage-aware student/assessment examples from local OULAD CSV files.
 
-This first pipeline intentionally uses only observed pre-deadline information.
-It does NOT claim that clicks or hypothetical study sessions cause higher marks.
+Only pre-deadline clicks and marks from earlier assessments are used as features.
+This is predictive association, not evidence that clicks or study sessions cause marks.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pathlib import Path
 MODULE = "FFF"
 PRESENTATIONS = ("2013J", "2014J")
 TRAIN_PRESENTATION = "2013J"
-TEST_PRESENTATION = "2014J"
 WINDOW_DAYS = 28
 RECENT_DAYS = 7
 
@@ -27,9 +26,7 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
     assessments = {}
     by_presentation = defaultdict(list)
     for row in read_csv(raw_dir / "assessments.csv"):
-        if (row["code_module"], row["code_presentation"]) != (MODULE, TRAIN_PRESENTATION) and (
-            row["code_module"], row["code_presentation"]
-        ) != (MODULE, TEST_PRESENTATION):
+        if row["code_module"] != MODULE or row["code_presentation"] not in PRESENTATIONS:
             continue
         if row["assessment_type"] != "TMA" or row["date"] == "?":
             continue
@@ -41,45 +38,39 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
     for rows in by_presentation.values():
         rows.sort(key=lambda item: (item["date"], item["id_assessment"]))
 
-    scores = defaultdict(list)
+    target_scores = {}
+    histories = defaultdict(list)
     for row in read_csv(raw_dir / "studentAssessment.csv"):
         assessment = assessments.get(row["id_assessment"])
         if assessment is None or row["score"] == "?":
             continue
-        scores[(assessment["code_presentation"], row["id_student"])].append(
-            (assessment["date"], float(row["score"]))
-        )
-    for values in scores.values():
+        score = float(row["score"])
+        key = (assessment["code_presentation"], row["id_student"])
+        target_scores[(key[0], key[1], row["id_assessment"])] = score
+        histories[key].append((assessment["date"], row["id_assessment"], score))
+    for values in histories.values():
         values.sort()
 
-    site_types = {}
-    for row in read_csv(raw_dir / "vle.csv"):
-        if row["code_module"] == MODULE and row["code_presentation"] in PRESENTATIONS:
-            site_types[(row["code_presentation"], row["id_site"])] = row["activity_type"]
-
-    # (presentation, student, assessment) -> [all-window clicks, recent clicks]
+    # Aggregate VLE clicks in [deadline - 28, deadline), excluding deadline day.
     activity = defaultdict(lambda: [0, 0])
-    target_assessments = defaultdict(list)
-    for presentation, rows in by_presentation.items():
-        for assessment in rows:
-            target_assessments[presentation].append(assessment)
-
+    targets = {
+        presentation: by_presentation[presentation]
+        for presentation in PRESENTATIONS
+    }
     for row in read_csv(raw_dir / "studentVle.csv"):
-        if row["code_module"] != MODULE or row["code_presentation"] not in PRESENTATIONS:
-            continue
-        if row["date"] == "?":
+        presentation = row["code_presentation"]
+        if row["code_module"] != MODULE or presentation not in targets or row["date"] == "?":
             continue
         day = int(row["date"])
-        presentation = row["code_presentation"]
         student = row["id_student"]
-        for assessment in target_assessments[presentation]:
+        clicks = int(row["sum_click"])
+        for assessment in targets[presentation]:
             deadline = assessment["date"]
             if deadline - WINDOW_DAYS <= day < deadline:
-                key = (presentation, student, assessment["id_assessment"])
-                clicks = int(row["sum_click"])
-                activity[key][0] += clicks
+                bucket = activity[(presentation, student, assessment["id_assessment"])]
+                bucket[0] += clicks
                 if day >= deadline - RECENT_DAYS:
-                    activity[key][1] += clicks
+                    bucket[1] += clicks
 
     fields = [
         "presentation", "split", "student_id", "assessment_id",
@@ -93,26 +84,18 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for presentation in PRESENTATIONS:
-            for student in sorted({student for (pres, student) in scores if pres == presentation}):
-                history = scores[(presentation, student)]
+            for (pres, student), history in sorted(histories.items()):
+                if pres != presentation:
+                    continue
                 for number, assessment in enumerate(by_presentation[presentation], start=1):
-                    target = next(
-                        (score for day, score in history if day == assessment["date"]
-                         and False), None
-                    )
-                    # Match the target by assessment id, not merely by deadline.
-                    target_row = None
-                    for row in read_csv(raw_dir / "studentAssessment.csv"):
-                        if row["id_assessment"] == assessment["id_assessment"] and row["id_student"] == student:
-                            if row["score"] != "?":
-                                target_row = float(row["score"])
-                            break
-                    if target_row is None:
+                    target_key = (presentation, student, assessment["id_assessment"])
+                    if target_key not in target_scores:
                         continue
-                    previous = [score for day, score in history if day < assessment["date"]]
-                    all_clicks, recent_clicks = activity[
-                        (presentation, student, assessment["id_assessment"])
+                    previous = [
+                        score for day, assessment_id, score in history
+                        if day < assessment["date"]
                     ]
+                    all_clicks, recent_clicks = activity[target_key]
                     writer.writerow({
                         "presentation": presentation,
                         "split": "train" if presentation == TRAIN_PRESENTATION else "test",
@@ -126,7 +109,7 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
                         "previous_score_last": previous[-1] if previous else "",
                         "clicks_preceding_28d": all_clicks,
                         "clicks_preceding_7d": recent_clicks,
-                        "target_score": target_row,
+                        "target_score": target_scores[target_key],
                     })
                     count += 1
     return count
