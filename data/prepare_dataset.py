@@ -1,7 +1,8 @@
 """Build leakage-aware student/assessment examples from local OULAD CSV files.
 
-Only pre-deadline clicks and marks from earlier assessments are used as features.
-This is predictive association, not evidence that clicks or study sessions cause marks.
+Only scores from earlier assessments that were actually submitted before the
+current deadline are used as history. Clicks are aggregated strictly before
+the deadline. This is predictive association, not causal evidence.
 """
 from __future__ import annotations
 
@@ -23,8 +24,8 @@ def read_csv(path: Path):
 
 
 def build_dataset(raw_dir: Path, output_path: Path) -> int:
-    assessments = {}
     by_presentation = defaultdict(list)
+    assessments = {}
     for row in read_csv(raw_dir / "assessments.csv"):
         if row["code_module"] != MODULE or row["code_presentation"] not in PRESENTATIONS:
             continue
@@ -47,24 +48,29 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
         score = float(row["score"])
         key = (assessment["code_presentation"], row["id_student"])
         target_scores[(key[0], key[1], row["id_assessment"])] = score
-        histories[key].append((assessment["date"], row["id_assessment"], score))
+
+        # A score is usable as a feature only if it was submitted before the
+        # target deadline. Exclude banked records from historical features
+        # because their original submission timing is not represented here.
+        if row["date_submitted"] != "?" and row.get("is_banked", "0") == "0":
+            submitted_day = int(row["date_submitted"])
+            histories[key].append(
+                (assessment["date"], submitted_day, row["id_assessment"], score)
+            )
+
     for values in histories.values():
-        values.sort()
+        values.sort(key=lambda item: (item[1], item[0], item[2]))
 
     # Aggregate VLE clicks in [deadline - 28, deadline), excluding deadline day.
     activity = defaultdict(lambda: [0, 0])
-    targets = {
-        presentation: by_presentation[presentation]
-        for presentation in PRESENTATIONS
-    }
     for row in read_csv(raw_dir / "studentVle.csv"):
         presentation = row["code_presentation"]
-        if row["code_module"] != MODULE or presentation not in targets or row["date"] == "?":
+        if row["code_module"] != MODULE or presentation not in by_presentation or row["date"] == "?":
             continue
         day = int(row["date"])
         student = row["id_student"]
         clicks = int(row["sum_click"])
-        for assessment in targets[presentation]:
+        for assessment in by_presentation[presentation]:
             deadline = assessment["date"]
             if deadline - WINDOW_DAYS <= day < deadline:
                 bucket = activity[(presentation, student, assessment["id_assessment"])]
@@ -88,12 +94,16 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
                 if pres != presentation:
                     continue
                 for number, assessment in enumerate(by_presentation[presentation], start=1):
+                    deadline = assessment["date"]
                     target_key = (presentation, student, assessment["id_assessment"])
                     if target_key not in target_scores:
                         continue
                     previous = [
-                        score for day, assessment_id, score in history
-                        if day < assessment["date"]
+                        score
+                        for assessment_day, submitted_day, assessment_id, score in history
+                        if assessment_id != assessment["id_assessment"]
+                        and assessment_day < deadline
+                        and submitted_day < deadline
                     ]
                     all_clicks, recent_clicks = activity[target_key]
                     writer.writerow({
@@ -102,7 +112,7 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
                         "student_id": student,
                         "assessment_id": assessment["id_assessment"],
                         "assessment_number": number,
-                        "assessment_day": assessment["date"],
+                        "assessment_day": deadline,
                         "assessment_weight": assessment["weight"],
                         "previous_score_count": len(previous),
                         "previous_score_mean": round(sum(previous) / len(previous), 4) if previous else "",
