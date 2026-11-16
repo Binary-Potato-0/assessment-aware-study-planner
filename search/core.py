@@ -98,6 +98,7 @@ class StudyAllocationProblem:
 def search(
     problem: StudyAllocationProblem,
     algorithm: Algorithm = "ucs",
+    goal_validator: Callable[[tuple[int, ...]], bool] | None = None,
 ) -> SearchResult:
     """Run UCS or Greedy Best-First Search on the allocation state space.
 
@@ -137,7 +138,7 @@ def search(
         marks = problem.predict(state)
         expanded += 1
 
-        if problem.is_goal(marks):
+        if problem.is_goal(marks) and (goal_validator is None or goal_validator(state)):
             return SearchResult(
                 algorithm, True, state, marks, sum(state), expanded, generated,
                 "Found an allocation meeting every target.",
@@ -166,5 +167,5 @@ def search(
     return SearchResult(
         algorithm, False, best_state, best_marks, sum(best_state),
         expanded, generated,
-        "No feasible allocation meets the target within the session limits.",
+        "No allocation meets the target and passes the feasibility validator within the session limits.",
     )
