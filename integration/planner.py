@@ -1,12 +1,12 @@
-"""Connect session-allocation search to weekly CSP scheduling.
+"""Connect allocation search to CSP schedule feasibility.
 
-The supplied base-mark predictor may be produced by the trained NN. Additional
-session gains are explicit scenario assumptions, not causal estimates.
+The supplied base marks can come from a trained NN. Per-session gains remain
+explicit scenario assumptions: OULAD does not identify their causal effect.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence, Callable
+from typing import Sequence
 
 from csp import StudyScheduleCSP, format_schedule
 from search import StudyAllocationProblem, search
@@ -38,11 +38,10 @@ def plan(
     use_forward_checking: bool = True,
     use_ac3: bool = False,
 ) -> PlannerResult:
-    """Find a minimum-session target allocation and a feasible timetable.
+    """Find a target-reaching allocation that also has a feasible timetable.
 
-    Search first proposes allocations in increasing cost order (UCS). If a
-    candidate cannot be scheduled, it is rejected and search continues.
-    Greedy is available for comparison, but does not guarantee minimum cost.
+    Search calls the CSP validator whenever it reaches a target state. An
+    unschedulable goal is rejected, and Search continues exploring.
     """
     base = tuple(float(x) for x in base_marks)
     deadlines = tuple(int(x) for x in deadline_weeks)
@@ -50,12 +49,13 @@ def plan(
         raise ValueError("base_marks and deadline_weeks must have equal non-zero length")
     if any(not 0 <= x <= 100 for x in base):
         raise ValueError("base marks must be between 0 and 100")
-    if session_gain_assumptions is None:
-        gains = (5.0,) * len(base)
-    else:
-        gains = tuple(float(x) for x in session_gain_assumptions)
-    if len(gains) != len(base):
-        raise ValueError("one session-gain assumption is required per assignment")
+    gains = (
+        (5.0,) * len(base)
+        if session_gain_assumptions is None
+        else tuple(float(x) for x in session_gain_assumptions)
+    )
+    if len(gains) != len(base) or any(g <= 0 for g in gains):
+        raise ValueError("one positive session-gain assumption is required per assignment")
 
     def scenario_predictor(allocation):
         return tuple(
@@ -70,26 +70,31 @@ def plan(
         max_sessions_per_assignment=max_sessions_per_assignment,
         estimated_gain_per_session=gains,
     )
+    csp_results = {}
 
-    # Search returns a target-reaching allocation. Scheduling it is a separate
-    # feasibility check; if it fails, this first implementation reports that
-    # failure rather than silently claiming a timetable exists.
-    result = search(problem, algorithm=algorithm)
-    if not result.success:
+    def schedule_validator(allocation):
+        csp = StudyScheduleCSP(allocation, deadlines, slots_per_week)
+        result = csp.solve(
+            forward_checking=use_forward_checking,
+            ac3=use_ac3,
+        )
+        csp_results[allocation] = result
+        return result.success
+
+    result = search(problem, algorithm=algorithm, goal_validator=schedule_validator)
+    scheduled = csp_results.get(result.allocation)
+    if not result.success or scheduled is None or not scheduled.success:
         return PlannerResult(
             False, algorithm, result.allocation, result.predicted_marks, {},
             result.total_sessions, result.nodes_expanded, result.nodes_generated,
-            0, 0, result.reason,
+            scheduled.assignments if scheduled else 0,
+            scheduled.backtracks if scheduled else 0,
+            result.reason,
         )
 
-    csp = StudyScheduleCSP(result.allocation, deadlines, slots_per_week)
-    scheduled = csp.solve(
-        forward_checking=use_forward_checking,
-        ac3=use_ac3,
-    )
     return PlannerResult(
-        scheduled.success, algorithm, result.allocation, result.predicted_marks,
-        format_schedule(scheduled.schedule, slots_per_week) if scheduled.success else {},
+        True, algorithm, result.allocation, result.predicted_marks,
+        format_schedule(scheduled.schedule, slots_per_week),
         result.total_sessions, result.nodes_expanded, result.nodes_generated,
         scheduled.assignments, scheduled.backtracks, scheduled.reason,
     )
