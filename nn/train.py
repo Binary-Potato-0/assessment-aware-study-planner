@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import joblib
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.neural_network import MLPRegressor
@@ -67,6 +68,7 @@ def main():
         "--data", type=Path, default=Path("data/processed/fff_tma_examples.csv")
     )
     parser.add_argument("--output", type=Path, default=Path("nn/results.json"))
+    parser.add_argument("--model-output", type=Path, default=Path("nn/model.joblib"))
     args = parser.parse_args()
 
     x_train, y_train, x_test, y_test = load_split(args.data)
@@ -97,10 +99,13 @@ def main():
         )),
     ])
     model.fit(x_train, y_train)
+    args.model_output.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump({"model": model, "features": FEATURES}, args.model_output)
     predictions = np.clip(model.predict(x_test), 0.0, 100.0)
 
     result = {
         "dataset": str(args.data),
+        "saved_model": str(args.model_output),
         "train_presentation": "FFF 2013J",
         "test_presentation": "FFF 2014J",
         "train_examples": int(len(y_train)),
