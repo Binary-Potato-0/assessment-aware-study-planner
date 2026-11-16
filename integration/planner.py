@@ -49,6 +49,8 @@ def plan(
         raise ValueError("base_marks and deadline_weeks must have equal non-zero length")
     if any(not 0 <= x <= 100 for x in base):
         raise ValueError("base marks must be between 0 and 100")
+    if any(x < 0 for x in deadlines):
+        raise ValueError("deadline weeks cannot be negative")
     gains = (
         (5.0,) * len(base)
         if session_gain_assumptions is None
@@ -56,6 +58,13 @@ def plan(
     )
     if len(gains) != len(base) or any(g <= 0 for g in gains):
         raise ValueError("one positive session-gain assumption is required per assignment")
+
+    # Meeting the target already is a valid zero-session plan, not a failure.
+    if all(mark >= target_mark for mark in base):
+        return PlannerResult(
+            True, algorithm, (0,) * len(base), base, {}, 0, 0, 1, 0, 0,
+            "Target already met without additional sessions.",
+        )
 
     def scenario_predictor(allocation):
         return tuple(
