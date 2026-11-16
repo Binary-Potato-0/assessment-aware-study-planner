@@ -13,7 +13,7 @@ def main():
         slots_per_week=3,
         # Scenario assumptions only; not causal effects learned from OULAD.
         session_gain_assumptions=(8, 5, 10),
-        max_sessions_per_assignment=6,
+        max_sessions_per_assignment=8,
         algorithm="ucs",
         use_forward_checking=True,
         use_ac3=True,
