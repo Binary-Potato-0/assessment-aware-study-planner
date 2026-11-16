@@ -1,8 +1,9 @@
-"""Uniform-Cost Search and Greedy Best-First Search for study allocation.
+"""Search for the smallest study-session allocation that reaches a target.
 
-A state is a tuple where state[i] is the number of sessions allocated to
-assignment i. The predictor is injected so search is independent of the
-neural-network implementation.
+A state is a tuple such as (1, 0, 2). It means:
+- 1 session for assessment 1
+- 0 sessions for assessment 2
+- 2 sessions for assessment 3
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ class SearchResult:
 
 
 class StudyAllocationProblem:
-    """Finite state-space model for allocating sessions to assignments."""
+    """Defines the states, limits, predictions, and goal for the search."""
 
     def __init__(
         self,
@@ -38,61 +39,69 @@ class StudyAllocationProblem:
         number_of_assignments: int,
         max_sessions_per_assignment: int | Sequence[int] = 8,
         estimated_gain_per_session: float | Sequence[float] = 5.0,
-    ) -> None:
+    ):
         if number_of_assignments < 1:
-            raise ValueError("number_of_assignments must be at least 1")
+            raise ValueError("At least one assignment is required.")
         if not 0 <= target_mark <= 100:
-            raise ValueError("target_mark must be between 0 and 100")
+            raise ValueError("Target mark must be between 0 and 100.")
 
         self.predictor = predictor
         self.target_mark = float(target_mark)
         self.number_of_assignments = number_of_assignments
 
+        # Allow either one common limit or a separate limit per assignment.
         if isinstance(max_sessions_per_assignment, int):
-            limits = (max_sessions_per_assignment,) * number_of_assignments
+            self.session_limits = (max_sessions_per_assignment,) * number_of_assignments
         else:
-            limits = tuple(int(x) for x in max_sessions_per_assignment)
-        if len(limits) != number_of_assignments or any(x < 0 for x in limits):
-            raise ValueError("session limits must be non-negative and match assignments")
-        self.limits = limits
+            self.session_limits = tuple(max_sessions_per_assignment)
 
+        if len(self.session_limits) != number_of_assignments:
+            raise ValueError("Provide one session limit per assignment.")
+        if any(limit < 0 for limit in self.session_limits):
+            raise ValueError("Session limits cannot be negative.")
+
+        # The gains are planning assumptions, not effects learned by the NN.
         if isinstance(estimated_gain_per_session, (int, float)):
-            gains = (float(estimated_gain_per_session),) * number_of_assignments
+            self.session_gains = (float(estimated_gain_per_session),) * number_of_assignments
         else:
-            gains = tuple(float(x) for x in estimated_gain_per_session)
-        if len(gains) != number_of_assignments or any(x <= 0 for x in gains):
-            raise ValueError("estimated gains must be positive and match assignments")
-        self.gains = gains
+            self.session_gains = tuple(float(gain) for gain in estimated_gain_per_session)
 
-    def predict(self, state: tuple[int, ...]) -> tuple[float, ...]:
-        marks = tuple(float(x) for x in self.predictor(state))
+        if len(self.session_gains) != number_of_assignments:
+            raise ValueError("Provide one session gain per assignment.")
+        if any(gain <= 0 for gain in self.session_gains):
+            raise ValueError("Session gains must be positive.")
+
+    def predict_marks(self, state: tuple[int, ...]) -> tuple[float, ...]:
+        """Ask the supplied prediction function for marks in this state."""
+        marks = tuple(float(mark) for mark in self.predictor(state))
+
         if len(marks) != self.number_of_assignments:
-            raise ValueError(
-                f"predictor returned {len(marks)} marks for "
-                f"{self.number_of_assignments} assignments"
-            )
+            raise ValueError("The predictor must return one mark per assignment.")
         if any(not math.isfinite(mark) for mark in marks):
-            raise ValueError("predictor returned a non-finite mark")
+            raise ValueError("Predicted marks must be finite numbers.")
+
+        # Assessment marks cannot be below 0 or above 100.
         return tuple(max(0.0, min(100.0, mark)) for mark in marks)
 
-    def is_goal(self, marks: tuple[float, ...]) -> bool:
+    def reached_target(self, marks: tuple[float, ...]) -> bool:
+        """The goal is reached only when every assessment meets the target."""
         return all(mark >= self.target_mark for mark in marks)
 
-    def heuristic(self, marks: tuple[float, ...]) -> float:
-        """Estimate remaining sessions from mark deficits and gain assumptions."""
-        return sum(
-            max(0.0, self.target_mark - mark) / gain
-            for mark, gain in zip(marks, self.gains)
-        )
+    def estimate_remaining_sessions(self, marks: tuple[float, ...]) -> float:
+        """Estimate how many sessions are still needed (Greedy heuristic)."""
+        estimate = 0.0
+        for mark, gain in zip(marks, self.session_gains):
+            deficit = max(0.0, self.target_mark - mark)
+            estimate += deficit / gain
+        return estimate
 
-    def neighbors(self, state: tuple[int, ...]):
-        """Generate states by adding exactly one session to one assignment."""
-        for index, limit in enumerate(self.limits):
-            if state[index] >= limit:
-                continue
-            child = list(state)
-            child[index] += 1
-            yield tuple(child)
+    def get_neighbors(self, state: tuple[int, ...]):
+        """A neighbor adds one session to exactly one assignment."""
+        for index, limit in enumerate(self.session_limits):
+            if state[index] < limit:
+                next_state = list(state)
+                next_state[index] += 1
+                yield tuple(next_state)
 
 
 def search(
@@ -100,72 +109,89 @@ def search(
     algorithm: Algorithm = "ucs",
     goal_validator: Callable[[tuple[int, ...]], bool] | None = None,
 ) -> SearchResult:
-    """Run UCS or Greedy Best-First Search on the allocation state space.
+    """Run Uniform-Cost Search or Greedy Best-First Search.
 
-    UCS prioritizes g(n), the number of sessions used, and is optimal because
-    every action costs exactly one session. Greedy prioritizes h(n), the
-    estimated remaining sessions, and is not guaranteed to be optimal.
+    UCS prioritizes the number of sessions already used, so it finds a
+    minimum-session solution when a solution exists.
+
+    Greedy prioritizes the estimated number of sessions still needed. It can
+    be faster, but it does not guarantee the minimum-session solution.
     """
     if algorithm not in ("ucs", "greedy"):
-        raise ValueError("algorithm must be 'ucs' or 'greedy'")
+        raise ValueError("Algorithm must be 'ucs' or 'greedy'.")
 
-    start = (0,) * problem.number_of_assignments
-    start_marks = problem.predict(start)
-    if problem.is_goal(start_marks):
+    start_state = (0,) * problem.number_of_assignments
+    start_marks = problem.predict_marks(start_state)
+
+    if problem.reached_target(start_marks):
         return SearchResult(
-            algorithm, True, start, start_marks, 0, 0, 1,
+            algorithm, True, start_state, start_marks, 0, 0, 1,
             "Target already met without additional sessions.",
         )
 
+    # The priority queue stores (priority, tie_breaker, state).
+    # The counter prevents Python from comparing state tuples on a tie.
     counter = itertools.count()
-    start_h = problem.heuristic(start_marks)
-    start_priority = 0.0 if algorithm == "ucs" else start_h
-    frontier = [(start_priority, next(counter), start)]
-    discovered = {start}
-    expanded = 0
-    generated = 1
+    start_priority = 0.0
+    if algorithm == "greedy":
+        start_priority = problem.estimate_remaining_sessions(start_marks)
 
-    best_state = start
+    frontier = [(start_priority, next(counter), start_state)]
+    discovered = {start_state}
+    nodes_expanded = 0
+    nodes_generated = 1
+
+    # Keep the best state seen in case no state reaches every target.
+    best_state = start_state
     best_marks = start_marks
-    best_key = (
-        sum(mark >= problem.target_mark for mark in start_marks),
-        -sum(max(0.0, problem.target_mark - mark) for mark in start_marks),
-        -sum(start),
-    )
+
+    def quality(marks, state):
+        targets_met = sum(mark >= problem.target_mark for mark in marks)
+        remaining_deficit = sum(
+            max(0.0, problem.target_mark - mark) for mark in marks
+        )
+        return targets_met, -remaining_deficit, -sum(state)
+
+    best_quality = quality(start_marks, start_state)
 
     while frontier:
         _, _, state = heapq.heappop(frontier)
-        marks = problem.predict(state)
-        expanded += 1
+        marks = problem.predict_marks(state)
+        nodes_expanded += 1
 
-        if problem.is_goal(marks) and (goal_validator is None or goal_validator(state)):
+        # The integration layer can reject a goal if its timetable is impossible.
+        is_valid_goal = goal_validator is None or goal_validator(state)
+        if problem.reached_target(marks) and is_valid_goal:
             return SearchResult(
-                algorithm, True, state, marks, sum(state), expanded, generated,
+                algorithm, True, state, marks, sum(state),
+                nodes_expanded, nodes_generated,
                 "Found an allocation meeting every target.",
             )
 
-        current_key = (
-            sum(mark >= problem.target_mark for mark in marks),
-            -sum(max(0.0, problem.target_mark - mark) for mark in marks),
-            -sum(state),
-        )
-        if current_key > best_key:
-            best_state, best_marks, best_key = state, marks, current_key
+        current_quality = quality(marks, state)
+        if current_quality > best_quality:
+            best_state, best_marks = state, marks
+            best_quality = current_quality
 
-        for child in problem.neighbors(state):
-            if child in discovered:
+        for next_state in problem.get_neighbors(state):
+            if next_state in discovered:
                 continue
-            discovered.add(child)
-            generated += 1
-            child_marks = problem.predict(child)
+
+            discovered.add(next_state)
+            nodes_generated += 1
+            next_marks = problem.predict_marks(next_state)
+
             if algorithm == "ucs":
-                priority = float(sum(child))
+                priority = float(sum(next_state))
             else:
-                priority = problem.heuristic(child_marks)
-            heapq.heappush(frontier, (priority, next(counter), child))
+                priority = problem.estimate_remaining_sessions(next_marks)
+
+            heapq.heappush(
+                frontier, (priority, next(counter), next_state)
+            )
 
     return SearchResult(
         algorithm, False, best_state, best_marks, sum(best_state),
-        expanded, generated,
-        "No feasible allocation meets the target and passes the feasibility validator within the session limits.",
+        nodes_expanded, nodes_generated,
+        "No feasible allocation meets the target within the session limits.",
     )
