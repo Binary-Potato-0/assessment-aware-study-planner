@@ -167,5 +167,5 @@ def search(
     return SearchResult(
         algorithm, False, best_state, best_marks, sum(best_state),
         expanded, generated,
-        "No allocation meets the target and passes the feasibility validator within the session limits.",
+        "No feasible allocation meets the target and passes the feasibility validator within the session limits.",
     )
