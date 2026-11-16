@@ -1,7 +1,11 @@
-"""Connect allocation search to CSP schedule feasibility.
+"""Combine the mark predictor, allocation search, and timetable CSP.
 
-The supplied base marks can come from a trained NN. Per-session gains remain
-explicit scenario assumptions: OULAD does not identify their causal effect.
+The neural network supplies baseline mark predictions.
+Search chooses how many sessions each assessment receives.
+The CSP checks whether those sessions fit before their deadlines.
+
+Session gains are explicit scenario assumptions, not causal effects learned
+from the OULAD dataset.
 """
 from __future__ import annotations
 
@@ -14,6 +18,8 @@ from search import StudyAllocationProblem, search
 
 @dataclass
 class PlannerResult:
+    """All information returned by one planning attempt."""
+
     success: bool
     algorithm: str
     allocation: tuple[int, ...]
@@ -27,6 +33,28 @@ class PlannerResult:
     reason: str
 
 
+def _validate_inputs(base_marks, target_mark, deadlines, gains):
+    """Reject invalid input before starting the algorithms."""
+    if not base_marks or len(base_marks) != len(deadlines):
+        raise ValueError("Provide matching, non-empty marks and deadlines.")
+    if not 0 <= target_mark <= 100:
+        raise ValueError("Target mark must be between 0 and 100.")
+    if any(mark < 0 or mark > 100 for mark in base_marks):
+        raise ValueError("Baseline marks must be between 0 and 100.")
+    if any(week < 0 for week in deadlines):
+        raise ValueError("Deadlines cannot be negative.")
+    if len(gains) != len(base_marks) or any(gain <= 0 for gain in gains):
+        raise ValueError("Provide one positive session gain per assessment.")
+
+
+def _scenario_mark_predictions(base_marks, gains, allocation):
+    """Apply the assumed gain to each assessment, without exceeding 100."""
+    return tuple(
+        min(100.0, mark + gain * sessions)
+        for mark, gain, sessions in zip(base_marks, gains, allocation)
+    )
+
+
 def plan(
     base_marks: Sequence[float],
     target_mark: float,
@@ -38,72 +66,103 @@ def plan(
     use_forward_checking: bool = True,
     use_ac3: bool = False,
 ) -> PlannerResult:
-    """Find a target-reaching allocation that also has a feasible timetable.
+    """Find a target-reaching allocation that also has a valid timetable."""
+    marks = tuple(float(mark) for mark in base_marks)
+    deadlines = tuple(int(week) for week in deadline_weeks)
 
-    Search calls the CSP validator whenever it reaches a target state. An
-    unschedulable goal is rejected, and Search continues exploring.
-    """
-    base = tuple(float(x) for x in base_marks)
-    deadlines = tuple(int(x) for x in deadline_weeks)
-    if not base or len(base) != len(deadlines):
-        raise ValueError("base_marks and deadline_weeks must have equal non-zero length")
-    if any(not 0 <= x <= 100 for x in base):
-        raise ValueError("base marks must be between 0 and 100")
-    if any(x < 0 for x in deadlines):
-        raise ValueError("deadline weeks cannot be negative")
-    gains = (
-        (5.0,) * len(base)
-        if session_gain_assumptions is None
-        else tuple(float(x) for x in session_gain_assumptions)
-    )
-    if len(gains) != len(base) or any(g <= 0 for g in gains):
-        raise ValueError("one positive session-gain assumption is required per assignment")
+    if session_gain_assumptions is None:
+        gains = (5.0,) * len(marks)
+    else:
+        gains = tuple(float(gain) for gain in session_gain_assumptions)
 
-    # Meeting the target already is a valid zero-session plan, not a failure.
-    if all(mark >= target_mark for mark in base):
+    _validate_inputs(marks, target_mark, deadlines, gains)
+
+    # If every baseline prediction already meets the target, no sessions
+    # are required and an empty timetable is a valid solution.
+    if all(mark >= target_mark for mark in marks):
         return PlannerResult(
-            True, algorithm, (0,) * len(base), base, {}, 0, 0, 1, 0, 0,
-            "Target already met without additional sessions.",
+            success=True,
+            algorithm=algorithm,
+            allocation=(0,) * len(marks),
+            predicted_marks=marks,
+            schedule={},
+            total_sessions=0,
+            nodes_expanded=0,
+            nodes_generated=1,
+            csp_assignments=0,
+            csp_backtracks=0,
+            reason="Target already met without additional sessions.",
         )
 
-    def scenario_predictor(allocation):
-        return tuple(
-            min(100.0, mark + gain * sessions)
-            for mark, gain, sessions in zip(base, gains, allocation)
-        )
+    # Search needs a function that predicts marks for any proposed allocation.
+    def predict_for_allocation(allocation):
+        return _scenario_mark_predictions(marks, gains, allocation)
 
     problem = StudyAllocationProblem(
-        predictor=scenario_predictor,
+        predictor=predict_for_allocation,
         target_mark=target_mark,
-        number_of_assignments=len(base),
+        number_of_assignments=len(marks),
         max_sessions_per_assignment=max_sessions_per_assignment,
         estimated_gain_per_session=gains,
     )
-    csp_results = {}
 
-    def schedule_validator(allocation):
-        csp = StudyScheduleCSP(allocation, deadlines, slots_per_week)
-        result = csp.solve(
+    # Search may find a mark allocation that cannot fit before the deadlines.
+    # Store CSP results so we can return the timetable for the accepted goal.
+    checked_schedules = {}
+
+    def timetable_is_feasible(allocation):
+        scheduler = StudyScheduleCSP(
+            sessions_per_assignment=allocation,
+            deadline_weeks=deadlines,
+            slots_per_week=slots_per_week,
+        )
+        csp_result = scheduler.solve(
             forward_checking=use_forward_checking,
             ac3=use_ac3,
         )
-        csp_results[allocation] = result
-        return result.success
+        checked_schedules[allocation] = csp_result
+        return csp_result.success
 
-    result = search(problem, algorithm=algorithm, goal_validator=schedule_validator)
-    scheduled = csp_results.get(result.allocation)
-    if not result.success or scheduled is None or not scheduled.success:
+    search_result = search(
+        problem,
+        algorithm=algorithm,
+        goal_validator=timetable_is_feasible,
+    )
+
+    csp_result = checked_schedules.get(search_result.allocation)
+
+    # No accepted allocation means Search exhausted its possible states.
+    if not search_result.success or csp_result is None or not csp_result.success:
         return PlannerResult(
-            False, algorithm, result.allocation, result.predicted_marks, {},
-            result.total_sessions, result.nodes_expanded, result.nodes_generated,
-            scheduled.assignments if scheduled else 0,
-            scheduled.backtracks if scheduled else 0,
-            result.reason,
+            success=False,
+            algorithm=algorithm,
+            allocation=search_result.allocation,
+            predicted_marks=search_result.predicted_marks,
+            schedule={},
+            total_sessions=search_result.total_sessions,
+            nodes_expanded=search_result.nodes_expanded,
+            nodes_generated=search_result.nodes_generated,
+            csp_assignments=csp_result.assignments if csp_result else 0,
+            csp_backtracks=csp_result.backtracks if csp_result else 0,
+            reason=search_result.reason,
         )
 
+    # Convert internal zero-based slots into human-readable week/slot pairs.
+    readable_schedule = format_schedule(
+        csp_result.schedule,
+        slots_per_week,
+    )
+
     return PlannerResult(
-        True, algorithm, result.allocation, result.predicted_marks,
-        format_schedule(scheduled.schedule, slots_per_week),
-        result.total_sessions, result.nodes_expanded, result.nodes_generated,
-        scheduled.assignments, scheduled.backtracks, scheduled.reason,
+        success=True,
+        algorithm=algorithm,
+        allocation=search_result.allocation,
+        predicted_marks=search_result.predicted_marks,
+        schedule=readable_schedule,
+        total_sessions=search_result.total_sessions,
+        nodes_expanded=search_result.nodes_expanded,
+        nodes_generated=search_result.nodes_generated,
+        csp_assignments=csp_result.assignments,
+        csp_backtracks=csp_result.backtracks,
+        reason=csp_result.reason,
     )
