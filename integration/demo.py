@@ -3,10 +3,13 @@ from nn.predict import predict_student_assignments
 from integration import plan
 
 
+# FULL PROJECT DEMO: run the trained NN, integrated Search+CSP planner, and print results.
 def main():
+    # STEP 1 — NEURAL NETWORK: load the trained model and get baseline marks.
     # Step 1: Load the trained neural network and predict three assessment marks.
     base_marks, student_id = predict_student_assignments()
 
+    # STEP 2 — SEARCH + CSP: find a target-reaching allocation that can be scheduled.
     # Step 2: Search for a session allocation that reaches the target.
     result = plan(
         base_marks=base_marks,
@@ -20,6 +23,7 @@ def main():
         use_ac3=True,
     )
 
+    # STEP 3 — OUTPUT: display predictions, allocation, timetable, and counters.
     # Step 3: Display the allocation and the timetable produced by the CSP.
     print("ASSESSMENT-AWARE STUDY PLANNER")
     print("=" * 40)
