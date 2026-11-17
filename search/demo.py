@@ -3,11 +3,14 @@
 from search import StudyAllocationProblem, search
 
 
+# TOY SEARCH SCENARIO: fixed starting marks, assumed gains, and target.
+# These values demonstrate the algorithms; they are not learned causal effects.
 BASE_MARKS = (50.0, 52.0, 45.0)
 SCENARIO_GAIN = (8.0, 5.0, 10.0)
 TARGET = 65.0
 
 
+# DEMO PREDICTOR: calculate scenario marks for a proposed session allocation.
 def illustrative_predictor(allocation: tuple[int, ...]) -> tuple[float, ...]:
     """Transparent toy scenario; not a causal model trained on OULAD."""
     return tuple(
@@ -16,6 +19,7 @@ def illustrative_predictor(allocation: tuple[int, ...]) -> tuple[float, ...]:
     )
 
 
+# DEMO RUNNER: compare UCS and Greedy on the same small problem.
 def main() -> None:
     problem = StudyAllocationProblem(
         predictor=illustrative_predictor,
