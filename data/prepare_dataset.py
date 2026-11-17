@@ -11,6 +11,9 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
+# ============================================================
+# DATASET CONFIGURATION: module, presentations, and activity windows
+# ============================================================
 MODULE = "FFF"
 PRESENTATIONS = ("2013J", "2014J")
 TRAIN_PRESENTATION = "2013J"
@@ -18,12 +21,17 @@ WINDOW_DAYS = 28
 RECENT_DAYS = 7
 
 
+# CSV READER: read OULAD files while handling their UTF-8 BOM.
 def read_csv(path: Path):
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         yield from csv.DictReader(handle)
 
 
+# ============================================================
+# DATASET BUILDER: raw OULAD tables -> one row per student/TMA example
+# ============================================================
 def build_dataset(raw_dir: Path, output_path: Path) -> int:
+    # ASSESSMENT METADATA: keep the FFF TMAs and order them by deadline.
     by_presentation = defaultdict(list)
     assessments = {}
     for row in read_csv(raw_dir / "assessments.csv"):
@@ -39,6 +47,8 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
     for rows in by_presentation.values():
         rows.sort(key=lambda item: (item["date"], item["id_assessment"]))
 
+    # SUBMISSION HISTORY: collect target scores and earlier submitted scores.
+    # Earlier-only history prevents future assessment results leaking into features.
     target_scores = {}
     histories = defaultdict(list)
     for row in read_csv(raw_dir / "studentAssessment.csv"):
@@ -61,6 +71,7 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
     for values in histories.values():
         values.sort(key=lambda item: (item[1], item[0], item[2]))
 
+    # VLE ACTIVITY FEATURES: count clicks only in windows before each deadline.
     # Aggregate VLE clicks in [deadline - 28, deadline), excluding deadline day.
     activity = defaultdict(lambda: [0, 0])
     for row in read_csv(raw_dir / "studentVle.csv"):
@@ -78,6 +89,7 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
                 if day >= deadline - RECENT_DAYS:
                     bucket[1] += clicks
 
+    # OUTPUT SCHEMA + EXPORT: write one feature row for each scored student/TMA.
     fields = [
         "presentation", "split", "student_id", "assessment_id",
         "assessment_number", "assessment_day", "assessment_weight",
@@ -125,6 +137,7 @@ def build_dataset(raw_dir: Path, output_path: Path) -> int:
     return count
 
 
+# COMMAND-LINE ENTRY POINT: parse paths and build the processed dataset.
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
