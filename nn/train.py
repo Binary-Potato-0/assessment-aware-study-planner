@@ -19,6 +19,9 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+# ============================================================
+# MODEL INPUTS: exact feature order expected by the neural network
+# ============================================================
 FEATURES = [
     "assessment_number",
     "assessment_day",
@@ -32,6 +35,7 @@ FEATURES = [
 PREVIOUS_MEAN_INDEX = FEATURES.index("previous_score_mean")
 
 
+# DATA LOADING: read the prepared CSV and separate train/test presentations.
 def load_split(path: Path):
     rows = []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -54,6 +58,7 @@ def load_split(path: Path):
     return (*arrays(train_rows), *arrays(test_rows))
 
 
+# EVALUATION METRICS: MAE, RMSE, and R-squared for regression.
 def metrics(y_true, y_pred):
     return {
         "mae": round(float(mean_absolute_error(y_true, y_pred)), 4),
@@ -62,6 +67,9 @@ def metrics(y_true, y_pred):
     }
 
 
+# ============================================================
+# TRAINING PIPELINE: load data -> baseline -> train -> evaluate -> save
+# ============================================================
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -73,6 +81,7 @@ def main():
 
     x_train, y_train, x_test, y_test = load_split(args.data)
 
+    # BASELINE MODEL: compare the NN with each student's previous-score mean.
     # Stronger and more relevant than a global mean: predict each student's
     # mean of scores actually available before the target assessment deadline.
     # Students without prior scores fall back to the training-set mean.
@@ -82,6 +91,7 @@ def main():
     )
     baseline_predictions = np.clip(baseline_predictions, 0.0, 100.0)
 
+    # NEURAL NETWORK: preprocessing plus a two-hidden-layer MLP regressor.
     model = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler()),
@@ -98,11 +108,14 @@ def main():
             random_state=42,
         )),
     ])
+    # TRAIN + SAVE: fit only on the training presentation and persist the pipeline.
     model.fit(x_train, y_train)
     args.model_output.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"model": model, "features": FEATURES}, args.model_output)
+    # TEST: predict marks for the held-out later presentation.
     predictions = np.clip(model.predict(x_test), 0.0, 100.0)
 
+    # REPORT: record the split, feature list, metrics, and interpretation.
     result = {
         "dataset": str(args.data),
         "saved_model": str(args.model_output),
