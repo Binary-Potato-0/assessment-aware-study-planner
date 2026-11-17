@@ -8,12 +8,14 @@ import joblib
 import numpy as np
 
 
+# MODEL LOADING: restore the trained pipeline and its feature order.
 def load_trained_model(model_path="nn/model.joblib"):
     """Load the model and the feature order saved during training."""
     saved_artifact = joblib.load(model_path)
     return saved_artifact["model"], saved_artifact["features"]
 
 
+# STUDENT PREDICTION: select one held-out student and predict their first 3 TMAs.
 def predict_student_assignments(
     data_path="data/processed/fff_tma_examples.csv",
     model_path="nn/model.joblib",
@@ -26,6 +28,7 @@ def predict_student_assignments(
     with Path(data_path).open("r", encoding="utf-8-sig", newline="") as file:
         rows = list(csv.DictReader(file))
 
+    # FILTER + GROUP: keep records from the requested presentation, grouped by student.
     # Group assessment records by student, using only the held-out presentation.
     students = {}
     for row in rows:
@@ -36,6 +39,7 @@ def predict_student_assignments(
         assessment_number = int(row["assessment_number"])
         students.setdefault(student_id, {})[assessment_number] = row
 
+    # PREDICT CANDIDATES: run the model for students with all three assessment rows.
     candidate_predictions = []
 
     for student_id, assessments in students.items():
@@ -59,6 +63,7 @@ def predict_student_assignments(
     if not candidate_predictions:
         raise RuntimeError("No held-out student has records for assessments 1, 2 and 3.")
 
+    # DEMO STUDENT SELECTION: prefer a student below target to show a non-zero plan.
     # Prefer a student below target in all three assessments, so the demo
     # demonstrates a non-zero allocation. Selection uses predictions only.
     below_target = [
