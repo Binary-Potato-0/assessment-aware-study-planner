@@ -16,6 +16,9 @@ from csp import StudyScheduleCSP, format_schedule
 from search import StudyAllocationProblem, search
 
 
+# ============================================================
+# INTEGRATED RESULT: everything returned to the caller
+# ============================================================
 @dataclass
 class PlannerResult:
     """All information returned by one planning attempt."""
@@ -33,6 +36,7 @@ class PlannerResult:
     reason: str
 
 
+# INPUT VALIDATION: reject invalid marks, deadlines, and gain assumptions.
 def _validate_inputs(base_marks, target_mark, deadlines, gains):
     """Reject invalid input before starting the algorithms."""
     if not base_marks or len(base_marks) != len(deadlines):
@@ -47,6 +51,7 @@ def _validate_inputs(base_marks, target_mark, deadlines, gains):
         raise ValueError("Provide one positive session gain per assessment.")
 
 
+# SCENARIO MARKS: apply the configured per-session assumptions.
 def _scenario_mark_predictions(base_marks, gains, allocation):
     """Apply the assumed gain to each assessment, without exceeding 100."""
     return tuple(
@@ -55,6 +60,9 @@ def _scenario_mark_predictions(base_marks, gains, allocation):
     )
 
 
+# ============================================================
+# MAIN INTEGRATION: NN baseline -> Search allocation -> CSP timetable
+# ============================================================
 def plan(
     base_marks: Sequence[float],
     target_mark: float,
@@ -77,6 +85,7 @@ def plan(
 
     _validate_inputs(marks, target_mark, deadlines, gains)
 
+    # CASE 1: the student already meets every target, so zero sessions work.
     # If every baseline prediction already meets the target, no sessions
     # are required and an empty timetable is a valid solution.
     if all(mark >= target_mark for mark in marks):
@@ -94,6 +103,7 @@ def plan(
             reason="Target already met without additional sessions.",
         )
 
+    # ADAPTER: give Search a mark-prediction function for each allocation.
     # Search needs a function that predicts marks for any proposed allocation.
     def predict_for_allocation(allocation):
         return _scenario_mark_predictions(marks, gains, allocation)
@@ -106,7 +116,7 @@ def plan(
         estimated_gain_per_session=gains,
     )
 
-    # Search may find a mark allocation that cannot fit before the deadlines.
+    # CSP GOAL VALIDATOR: Search may find a mark allocation that cannot fit before the deadlines.
     # Store CSP results so we can return the timetable for the accepted goal.
     checked_schedules = {}
 
@@ -123,6 +133,7 @@ def plan(
         checked_schedules[allocation] = csp_result
         return csp_result.success
 
+    # RUN SEARCH: the goal validator rejects allocations with impossible timetables.
     search_result = search(
         problem,
         algorithm=algorithm,
@@ -131,6 +142,8 @@ def plan(
 
     csp_result = checked_schedules.get(search_result.allocation)
 
+    # FAILURE PATH: do not report success if no target-reaching allocation
+    # also has a valid timetable.
     # No accepted allocation means Search exhausted its possible states.
     if not search_result.success or csp_result is None or not csp_result.success:
         return PlannerResult(
@@ -147,6 +160,7 @@ def plan(
             reason=search_result.reason,
         )
 
+    # SUCCESS PATH: convert internal zero-based slots into readable week/slot pairs.
     # Convert internal zero-based slots into human-readable week/slot pairs.
     readable_schedule = format_schedule(
         csp_result.schedule,
