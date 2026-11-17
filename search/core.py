@@ -13,10 +13,16 @@ import itertools
 import math
 from typing import Callable, Literal, Sequence
 
+# ============================================================
+# SEARCH TYPES: the predictor and algorithm names used below
+# ============================================================
 Predictor = Callable[[tuple[int, ...]], Sequence[float]]
 Algorithm = Literal["ucs", "greedy"]
 
 
+# ============================================================
+# SEARCH RESULT: the answer and performance counters returned
+# ============================================================
 @dataclass(frozen=True)
 class SearchResult:
     algorithm: str
@@ -29,6 +35,9 @@ class SearchResult:
     reason: str
 
 
+# ============================================================
+# SEARCH PROBLEM: states, actions, limits, marks, and goal test
+# ============================================================
 class StudyAllocationProblem:
     """Defines the states, limits, predictions, and goal for the search."""
 
@@ -71,6 +80,7 @@ class StudyAllocationProblem:
         if any(gain <= 0 for gain in self.session_gains):
             raise ValueError("Session gains must be positive.")
 
+    # Ask the prediction function for marks and validate its output.
     def predict_marks(self, state: tuple[int, ...]) -> tuple[float, ...]:
         """Ask the supplied prediction function for marks in this state."""
         marks = tuple(float(mark) for mark in self.predictor(state))
@@ -83,10 +93,12 @@ class StudyAllocationProblem:
         # Assessment marks cannot be below 0 or above 100.
         return tuple(max(0.0, min(100.0, mark)) for mark in marks)
 
+    # GOAL TEST: every assessment must reach the requested mark.
     def reached_target(self, marks: tuple[float, ...]) -> bool:
         """The goal is reached only when every assessment meets the target."""
         return all(mark >= self.target_mark for mark in marks)
 
+    # GREEDY HEURISTIC: estimate remaining sessions from mark deficits.
     def estimate_remaining_sessions(self, marks: tuple[float, ...]) -> float:
         """Estimate how many sessions are still needed (Greedy heuristic)."""
         estimate = 0.0
@@ -95,6 +107,7 @@ class StudyAllocationProblem:
             estimate += deficit / gain
         return estimate
 
+    # ACTIONS / SUCCESSORS: add one session to one assessment at a time.
     def get_neighbors(self, state: tuple[int, ...]):
         """A neighbor adds one session to exactly one assignment."""
         for index, limit in enumerate(self.session_limits):
@@ -104,6 +117,9 @@ class StudyAllocationProblem:
                 yield tuple(next_state)
 
 
+# ============================================================
+# SEARCH ENGINE: shared loop used by both UCS and Greedy Search
+# ============================================================
 def search(
     problem: StudyAllocationProblem,
     algorithm: Algorithm = "ucs",
@@ -129,6 +145,8 @@ def search(
             "Target already met without additional sessions.",
         )
 
+    # UCS priority = sessions already spent (path cost g).
+    # GREEDY priority = estimated sessions still needed (heuristic h).
     # The priority queue stores (priority, tie_breaker, state).
     # The counter prevents Python from comparing state tuples on a tie.
     counter = itertools.count()
@@ -181,15 +199,19 @@ def search(
             nodes_generated += 1
             next_marks = problem.predict_marks(next_state)
 
+            # UCS: prioritize the lowest total number of sessions so far.
             if algorithm == "ucs":
                 priority = float(sum(next_state))
             else:
+                # GREEDY: prioritize the smallest estimated remaining deficit.
                 priority = problem.estimate_remaining_sessions(next_marks)
 
             heapq.heappush(
                 frontier, (priority, next(counter), next_state)
             )
 
+    # No goal passed both the target test and (if supplied) the validator.
+    # Return the best state seen, clearly marked as a failure.
     return SearchResult(
         algorithm, False, best_state, best_marks, sum(best_state),
         nodes_expanded, nodes_generated,
