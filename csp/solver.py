@@ -14,6 +14,9 @@ from collections import deque
 from dataclasses import dataclass
 
 
+# ============================================================
+# CSP RESULT: schedule, success flag, and solver statistics
+# ============================================================
 @dataclass
 class CSPResult:
     success: bool
@@ -23,6 +26,9 @@ class CSPResult:
     reason: str
 
 
+# ============================================================
+# CSP MODEL: variables, domains, constraints, and search procedure
+# ============================================================
 class StudyScheduleCSP:
     def __init__(self, sessions_per_assignment, deadline_weeks, slots_per_week=3):
         if len(sessions_per_assignment) != len(deadline_weeks):
@@ -43,6 +49,7 @@ class StudyScheduleCSP:
         self._create_variables(sessions_per_assignment, deadline_weeks)
         self.neighbors = self._create_neighbors()
 
+    # VARIABLES + DOMAINS: create one variable for every study session.
     def _create_variables(self, session_counts, deadlines):
         """Create one variable for every required study session."""
         for assignment_index, (count, deadline) in enumerate(
@@ -66,6 +73,7 @@ class StudyScheduleCSP:
             ):
                 self.previous_session[current] = previous
 
+    # CONSTRAINT GRAPH: record which variables must be checked together.
     def _create_neighbors(self):
         """Every pair of variables is connected by scheduling constraints."""
         neighbors = {variable: set() for variable in self.variables}
@@ -77,6 +85,7 @@ class StudyScheduleCSP:
 
         return neighbors
 
+    # CONSTRAINT CHECK: distinct slots and session ordering.
     def is_compatible(self, first, first_slot, second, second_slot):
         """Check whether two sessions can use the proposed slots."""
         if first_slot == second_slot:
@@ -92,6 +101,7 @@ class StudyScheduleCSP:
 
         return True
 
+    # SOLVE: optionally run AC-3, then use backtracking to find a timetable.
     def solve(self, forward_checking=True, ac3=False):
         """Try to find a complete schedule using backtracking."""
         domains = {
@@ -125,6 +135,7 @@ class StudyScheduleCSP:
             "Schedule found.",
         )
 
+    # MRV HEURISTIC: choose the unassigned variable with the smallest domain.
     def _select_next_variable(self, assignment, domains):
         """MRV: choose the unassigned variable with the smallest domain."""
         unassigned = [
@@ -133,6 +144,7 @@ class StudyScheduleCSP:
         ]
         return min(unassigned, key=lambda variable: len(domains[variable]))
 
+    # BACKTRACKING SEARCH: assign a slot, check consistency, and undo failures.
     def _backtrack(self, assignment, domains, forward_checking, use_ac3):
         if len(assignment) == len(self.variables):
             return dict(assignment)
@@ -182,6 +194,7 @@ class StudyScheduleCSP:
 
         return None
 
+    # FORWARD CHECKING: prune neighbor domains after a new assignment.
     def _forward_check(self, variable, slot, assignment, domains):
         """Remove values that conflict with the newly assigned session."""
         for neighbor in self.neighbors[variable]:
@@ -199,6 +212,7 @@ class StudyScheduleCSP:
 
         return True
 
+    # AC-3: enforce arc consistency by repeatedly revising connected domains.
     def _run_ac3(self, domains, assigned=None):
         """Enforce arc consistency by revising neighboring variable domains."""
         assigned = assigned or {}
@@ -238,6 +252,9 @@ class StudyScheduleCSP:
         )
 
 
+# ============================================================
+# OUTPUT FORMATTING: convert internal slots to (week, slot) pairs
+# ============================================================
 def format_schedule(schedule, slots_per_week):
     """Convert zero-based slot numbers to (week, slot), both starting at 1."""
     readable_schedule = {}
